@@ -1,0 +1,16 @@
+{
+  "name": "kontrol",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Личное приложение тотального контроля дня",
+  "dependencies": {
+    "@capacitor/android": "^7.0.0",
+    "@capacitor/core": "^7.0.0",
+    "@capacitor/ios": "^7.0.0",
+    "@capacitor/local-notifications": "^7.0.0"
+  },
+  "devDependencies": {
+    "@capacitor/assets": "^3.0.5",
+    "@capacitor/cli": "^7.0.0"
+  }
+}
