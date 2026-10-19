@@ -83,3 +83,4 @@ nav button.on{color:var(--text)}
 .rating button{border:1px solid var(--line);background:var(--card2);color:var(--text);border-radius:10px;padding:11px 0;font-weight:700}
 .rating button.on{background:var(--red);border-color:var(--red);color:#fff}
 hr{border:0;border-top:1px solid var(--line);margin:14px 0}
+nav[hidden],#toast[hidden]{display:none}

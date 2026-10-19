@@ -195,8 +195,65 @@ function buildPlan() {
   return out.slice(0, 60);
 }
 
+/* ---------- веб-версия (iPhone с экрана «Домой»): напоминания через сервер ---------- */
+const WEB = !isNative && 'serviceWorker' in navigator;
+const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const standalone = window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+const pushSupported = WEB && 'PushManager' in window && 'Notification' in window;
+let swReg = null;
+let lastSync = 0;
+
+async function getSW() {
+  if (swReg) return swReg;
+  if (!WEB) return null;
+  try { swReg = await navigator.serviceWorker.register('sw.js'); await navigator.serviceWorker.ready; } catch (e) { swReg = null; }
+  return swReg;
+}
+async function webSub() {
+  const reg = await getSW();
+  if (!reg || !reg.pushManager) return null;
+  try { return await reg.pushManager.getSubscription(); } catch (e) { return null; }
+}
+const webPushOn = async () => pushSupported && Notification.permission === 'granted' && !!(await webSub());
+
+// вызывать прямо из нажатия кнопки — iPhone требует действие пользователя
+async function enableWebPush() {
+  if (!pushSupported) return isIOS && !standalone ? 'install' : 'unsupported';
+  let perm = Notification.permission;
+  if (perm !== 'granted') perm = await Notification.requestPermission();
+  if (perm !== 'granted') return 'denied';
+  const reg = await getSW();
+  if (!reg) return 'error';
+  try {
+    let sub = await reg.pushManager.getSubscription();
+    const { key } = await (await fetch('api/key', { cache: 'no-store' })).json();
+    if (sub && sub.options && sub.options.applicationServerKey) {
+      const cur = btoa(String.fromCharCode(...new Uint8Array(sub.options.applicationServerKey))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+      if (cur !== key) { await sub.unsubscribe(); sub = null; }
+    }
+    if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64uToBytes(key) });
+    await sendWebPlan(sub);
+    return 'granted';
+  } catch (e) { console.warn(e); return 'error'; }
+}
+function b64uToBytes(s) {
+  const b = atob(s.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((s.length + 3) % 4));
+  return Uint8Array.from(b, c => c.charCodeAt(0));
+}
+async function sendWebPlan(sub) {
+  sub = sub || await webSub();
+  if (!sub) return false;
+  const items = buildPlan().map(n => ({ at: n.at.getTime(), title: n.title, body: n.body, screen: n.screen }));
+  try {
+    const r = await fetch('api/plan', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sub: sub.toJSON(), items }) });
+    if (r.ok) lastSync = Date.now();
+    return r.ok;
+  } catch (e) { return false; } // нет интернета — отправим при следующем изменении
+}
+
 async function rescheduleAll() {
-  if (!LN || !S.settings.setupDone) return;
+  if (!S.settings.setupDone) return;
+  if (!LN) { if (pushSupported && Notification.permission === 'granted') sendWebPlan(); return; }
   try {
     const p = await LN.getPending();
     if (p.notifications && p.notifications.length) await LN.cancel({ notifications: p.notifications.map(n => ({ id: n.id })) });
@@ -231,7 +288,20 @@ function toast(msg) {
   clearTimeout(toast._t); toast._t = setTimeout(() => { t.hidden = true; }, 2600);
 }
 
+function renderInstall() {
+  return `<h1>Контроль</h1>
+  <p class="muted">Сначала добавь приложение на экран «Домой». Только так iPhone разрешит присылать напоминания, а твои данные будут сохраняться.</p>
+  <div class="card">
+    <div class="task"><div class="t">1. Нажми кнопку «Поделиться»</div><div class="muted small">Квадрат со стрелкой вверх внизу экрана Safari (или в меню «•••»)</div></div>
+    <div class="task"><div class="t">2. Выбери «На экран „Домой“»</div><div class="muted small">Если не видно — прокрути список вниз</div></div>
+    <div class="task"><div class="t">3. Нажми «Добавить»</div><div class="muted small">Появится иконка «Контроль»</div></div>
+    <div class="task"><div class="t">4. Закрой Safari и открой «Контроль» с иконки</div></div>
+  </div>
+  <div class="card warn"><p class="muted small" style="margin:0">Открывай ссылку именно в <b>Safari</b>. Нужен iOS 16.4 или новее (Настройки → Основные → Об этом устройстве).</p></div>`;
+}
+
 function render() {
+  if (WEB && isIOS && !standalone) { $nav.hidden = true; $app.innerHTML = renderInstall(); return; }
   if (!S.settings.setupDone) { $nav.hidden = true; $app.innerHTML = renderWizard(); return; }
   $nav.hidden = false;
   $nav.querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.tab === tab));
@@ -307,6 +377,10 @@ function renderToday() {
   let html = `<div class="row between"><div><div class="muted small">${prettyDate(key)}</div><h1>${st.name ? esc(st.name) + ', ' : ''}${greet(now)}</h1></div>
     <div style="text-align:right"><div class="score" style="color:${score >= 70 ? 'var(--green)' : score >= 40 ? 'var(--amber)' : 'var(--red)'}">${score}</div><div class="muted small">очков дня</div></div></div>`;
   html += `<div class="bar ${score >= 70 ? 'g' : score >= 40 ? 'a' : ''}" style="margin-bottom:16px"><i style="width:${score}%"></i></div>`;
+  if (pushSupported && Notification.permission !== 'granted') {
+    html += `<div class="card alert"><div class="row between"><h2>Уведомления выключены</h2><span class="tag red">КОНТРОЛЯ НЕТ</span></div>
+      <p class="muted small">Без уведомлений приложение не сможет дожимать тебя.</p><button class="btn" data-act="enablepush">Включить уведомления</button></div>`;
+  }
 
   // 1. План дня
   if (!d.planAt) {
@@ -486,9 +560,9 @@ function renderSettings() {
   </div>
   <div class="card"><h2>Уведомления</h2>
     <p class="muted small" id="exactstatus">Проверяю…</p>
-    <button class="btn ghost" data-act="testnotif">Проверить: уведомление через 10 секунд</button>
+    <button class="btn ghost" data-act="testnotif">${LN ? 'Проверить: уведомление через 10 секунд' : 'Проверить уведомление'}</button>
     <button class="btn ghost" data-act="exact" id="exactbtn" hidden>Разрешить точные будильники</button>
-    <p class="muted small" style="margin-top:12px">Открывай приложение хотя бы раз в день — так оно обновляет расписание напоминаний на 2 дня вперёд.${platform === 'android' ? ' Если напоминания опаздывают: Настройки телефона → Приложения → Контроль → Батарея → «Без ограничений».' : ''}</p>
+    <p class="muted small" style="margin-top:12px">Открывай приложение хотя бы раз в день — так оно обновляет расписание напоминаний на 2 дня вперёд.${LN ? '' : ' Каждое изменение отправляется на сервер, поэтому после отметки задачи нужен интернет.'}${platform === 'android' ? ' Если напоминания опаздывают: Настройки телефона → Приложения → Контроль → Батарея → «Без ограничений».' : ''}</p>
   </div>
   <div class="card"><h2>Резервная копия</h2>
     <p class="muted small">Все данные хранятся только в телефоне. Перед удалением приложения или сменой телефона скопируй их.</p>
@@ -502,7 +576,14 @@ function renderSettings() {
 async function fillExactStatus() {
   const el = document.getElementById('exactstatus'), btn = document.getElementById('exactbtn');
   if (!el) return;
-  if (!LN) { el.textContent = 'Уведомления работают только в установленном приложении.'; return; }
+  if (!LN) {
+    if (!pushSupported) { el.textContent = 'Этот браузер не поддерживает уведомления.'; return; }
+    const on = await webPushOn();
+    el.textContent = on ? 'Уведомления включены. Напоминания приходят через интернет.' + (lastSync ? ' Расписание отправлено в ' + hm(new Date(lastSync)) + '.' : ' Расписание ещё не отправлено — проверь интернет.')
+      : 'Уведомления ВЫКЛЮЧЕНЫ — контроль не работает.';
+    if (!on) { btn.hidden = false; btn.textContent = 'Включить уведомления'; btn.dataset.act = 'enablepush'; }
+    return;
+  }
   const p = await notifPermission(false);
   let txt = p === 'granted' ? 'Уведомления разрешены.' : 'Уведомления ЗАПРЕЩЕНЫ — контроль не работает. Разреши их в настройках телефона.';
   if (platform === 'android' && LN.checkExactNotificationSetting) {
@@ -554,10 +635,11 @@ document.addEventListener('click', async e => {
       S.settings = Object.assign({}, wiz.d, { setupDone: true });
       wiz = { step: 0, d: null };
       save();
-      await setupChannel();
-      const p = await notifPermission(true);
+      let p;
+      if (LN) { await setupChannel(); p = await notifPermission(true); }
+      else p = await enableWebPush();
       tab = 'today'; render();
-      toast(p === 'granted' || !LN ? 'Контроль включён. Начинаем.' : 'Уведомления не разрешены — включи их в настройках телефона');
+      toast(p === 'granted' ? 'Контроль включён. Начинаем.' : 'Уведомления не включены — без них контроль не работает');
       break;
     }
 
@@ -620,12 +702,25 @@ document.addEventListener('click', async e => {
     case 'sdelhabit': collectHabits(); S.settings.habits.splice(+el.dataset.i, 1); save(); render(); break;
     case 'savehabits': collectHabits(); save(); render(); toast('Привычки сохранены.'); break;
     case 'testnotif': {
-      if (!LN) { toast('Работает только в установленном приложении.'); return; }
+      if (!LN) {
+        const st = await enableWebPush();
+        if (st !== 'granted') { toast(st === 'denied' ? 'Уведомления запрещены. Включи: Настройки → Уведомления → Контроль.' : 'Нет связи с сервером. Проверь интернет.'); return; }
+        try {
+          const r = await fetch('api/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sub: (await webSub()).toJSON() }) });
+          toast(r.ok ? 'Отправлено. Уведомление придёт через пару секунд.' : 'Сервер не смог отправить уведомление.');
+        } catch (e) { toast('Нет связи с сервером. Проверь интернет.'); }
+        fillExactStatus(); return;
+      }
       const p = await notifPermission(true);
       if (p !== 'granted') { toast('Уведомления запрещены в настройках телефона.'); return; }
       await setupChannel();
       await LN.schedule({ notifications: [{ id: 999, title: 'Проверка связи', body: 'Контроль работает. Отговорок больше нет.', channelId: 'kontrol', schedule: { at: new Date(Date.now() + 10000), allowWhileIdle: true } }] });
       toast('Жди уведомление через 10 секунд. Можешь закрыть приложение.'); break;
+    }
+    case 'enablepush': {
+      const st = await enableWebPush();
+      toast(st === 'granted' ? 'Уведомления включены. Контроль работает.' : st === 'denied' ? 'Запрещено. Включи: Настройки iPhone → Уведомления → Контроль.' : st === 'install' ? 'Сначала добавь приложение на экран «Домой».' : 'Нет связи с сервером. Проверь интернет.');
+      render(); break;
     }
     case 'exact':
       try { await LN.changeExactNotificationSetting(); } catch (e) {}
@@ -697,6 +792,17 @@ if (LN) {
   } catch (e) {}
 }
 
+{
+  const scr = new URLSearchParams(location.search).get('screen');
+  if (scr === 'stats') tab = 'stats';
+}
+if (WEB) {
+  getSW();
+  navigator.serviceWorker.addEventListener('message', e => {
+    if (e.data && e.data.screen) { tab = e.data.screen === 'stats' ? 'stats' : 'today'; render(); window.scrollTo(0, 0); }
+  });
+  window.addEventListener('online', scheduleSoon);
+}
 render();
 if (S.settings.setupDone) { setupChannel().then(rescheduleAll); }
 
